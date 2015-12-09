@@ -153,52 +153,59 @@ void dumpDecisionMap(i32 m[MAP_ROW+2][MAP_COL+2], F f) {
 
 void dumpDTS() {
     dumpDecisionMap( dts, [](i32 v){
-        if (v==0)
+        if (v==0){
             DBG("  ");
-        else if (v>=DTS_MAX)
+        }else if (v>=DTS_MAX){
             DBG("##");
-        else
+        }else{
             DBG("%2d", v);
+        }
     } );
     //char c[1000]; gets(c);
 }
 void dumpDFH() {
     dumpDecisionMap( dfh, [](i32 v){
-        if (v==0)
+        if (v==0){
             DBG("##");
-        else if (v>=DTS_MAX)
+        }else if (v>=DTS_MAX){
             DBG("##");
-        else
+        }else{
             DBG("%2d", v);
+        }
     } );
     //char c[1000]; gets(c);
 }
 void dumpEvd() {
     dumpDecisionMap( evd, [](i32 v){
-        if (v) DBG("%2d", v);
-        else   DBG("  ");
+        if (v) {
+            DBG("%2d", v);
+        }else{
+            DBG("  ");
+        }
     });
 }
 void dumpSPV() {
     dumpDecisionMap3( spv, [](i32 spv, int y, int x){
-        if (Type == STONE)
+        if (Type == STONE){
             DBG("%s", "##");
-        else
+        }else{
             DBG("%2d", spv);
+        }
     });
 }
 void dumpSPath() {
     dumpDecisionMap33( spath, [](i32 bit_d, int y, int x){
-        if (Type == STONE)
+        if (Type == STONE){
             DBG("%s", "###");
-        else if (Type==WOOD)
+        }else if (Type==WOOD){
             DBG("%c%s", 'X', dirs_str[bit_d&15]);
-        else if (Type==BOMB)
+        }else if (Type==BOMB){
             DBG("%c%s", '0'+map[y][x].bomb.TTL, dirs_str[bit_d&15]);
-        else if (Type==HOME)
+        }else if (Type==HOME){
             DBG("%s%s", "H", dirs_str[bit_d&15]);
-        else
+        }else{
             DBG(".%s", dirs_str[bit_d&15]);
+        }
     });
 }
 
