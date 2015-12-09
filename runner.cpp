@@ -7,8 +7,8 @@
 
 #define i32 int32_t
 
-#define SET_PLAYER(p,id,y,x) {   \
-    p.group=1, p.player=id, p.life_value=3, p.bomb_num=3, p.pos.y=y, p.pos.x=x; \
+#define SET_PLAYER(p,id,_y,_x) {   \
+    p.group=1, p.player=id, p.life_value=3, p.bomb_num=3, p.pos.y=_y, p.pos.x=_x; \
 }
 
 Game g;
@@ -18,13 +18,13 @@ const char* cmap[MAP_ROW+2] = {
     "*-*  - * * -  *-*",
     "* - - - - - - - *",
     "* -*-- *-* --*- *",
-    "* C  * A   *    *",
-    "*2*     --    * *",
+    "*    *  -  *    *",
+    "* *  - --- -  *B*",
     "*   *  *-*  *  -*",
-    "*X*   ----    *H*",
-    "*   *  *-*  *  -*",
-    "*2*     --    * *",
-    "* B  *     *    *",
+    "*X*   -----   *H*",
+    "*A  *  *-*  *  -*",
+    "*2*  - --- - C* *",
+    "*    *  -  *    *",
     "* -*-- *-* --*- *",
     "* - - - - - - - *",
     "*-*  - * * -  *-*",
@@ -39,6 +39,7 @@ int main() {
     cmap2map();
     Operator op[3];
     dumpMap();
+    //SET_PLAYER(g.group[1].player[0], 0, 5, 10);
     AI(&g, op);
 }
 
