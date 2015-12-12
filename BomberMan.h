@@ -110,10 +110,11 @@ typedef struct _Game {
 /* API functions */
 extern int api_set_group_name(const char *str);
 
-
-
 /* AI entry function */
 extern void AI(const Game *game, Operator op[PLAYER_NUM]);
+
+/* AI Init function */
+extern void Init(void);
 
 #ifdef __cplusplus
 }

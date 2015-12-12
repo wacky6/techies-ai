@@ -6,12 +6,19 @@
 #include <cstdlib>
 #include <functional>
 #include <ctime>
+#include <cstring>
 using namespace std;
+
+void Init(void){
+	api_set_group_name("Techies");
+}
+
+#define DEBUG_FLAG (false)
 
 #define i32 int32_t
 #define min4(a,b,c,d) (std::min(std::min(a, b), std::min(c, d)))
-#define DBG  printf
-#define EQU_YX(ix,y,x) (yx==((y)<<16|(x)))
+#define DBG if(DEBUG_FLAG) printf
+#define EQU_YX(yx,y,x) (yx==((y)<<16|(x)))
 #define YX(y,x) ((y)<<16|(x))
 #define gY(yx) ((yx & 0xFFFF0000)>>16)
 #define gX(yx) ((yx & 0x0000FFFF))
@@ -53,9 +60,11 @@ inline Coord COORD(int y, int x) {
 
 // initialize these in AI()
 const Player *player;
+const Player *enemy_player;
 Operator *player_op;
+CoordSet player_pos;
 long grpid;
-long round;
+long game_round;
 
 bool kamakaze = false;
 i32 dts[MAP_ROW+2][MAP_COL+2];    // Distance to Strike
@@ -71,7 +80,10 @@ const i32 SPV_MAX  = 0x0000FFFF;
 const i32 EVD_MIN  = 0x80000000;
 const i32 EVD_MAX  = 0x7FFFFFFF;
 const i32 DFH_MAX  = 0x7FFFFFFF;
-const i32 EVADE_TTL_THRESHOLD = 3;
+const i32 BOMB_STACK_FACTOR = 1;
+const i32 CLUSTER_DIST = 1;
+const i32 CLUSTER_FACTOR = 2;
+const i32 PLAYER_B_STAGE_2_ROUND = 6;
 Object map[MAP_ROW+2][MAP_COL+2];
 
 /* direction delta manipulator
@@ -93,24 +105,22 @@ Operator dirs_op[4] = {UP, DOWN, LEFT, RIGHT};
 #define BIT_PUT    (1<<8)
 int dirs_bit[4] = {0, 1, 2, 3};
 const char* dirs_str[16] = {
-    "⊚ ", "↑",  "↓",  " V",
-    "←",  "LU", "LD", "LV",
-    "→",  "RU", "RD", "RV",
+    "⊚ ", "↑ ", "↓ ", " V",
+    "← ", "LU", "LD", "LV",
+    "→ ", "RU", "RD", "RV",
     " H", "HU", "HD", "HV"
 };
 
-Coord enemy_home;
-Coord my_home;
+Coord enemy;
+Coord my;
 CoordSet cs_a, cs_b;
 CoordSet *cs, *next_cs;
+bool bomb_at_home;
 
 // Assume map, y, x, s_yx are in the context
 #define Type         ( map[y][x].type )
 #define TypeYX(y,x)  ( map[y][x].type )
 #define DTS(y,x)     ( dts[y][x] ? dts[y][x] : DTS_MAX )
-// WOOD is on Shortest-Path, if neighbour points to it (I guessed :D)
-//                           and DTS(WOOD) < DTS(cur)    // checked in decision maker
-#define SPATH_WOOD(y,x) ( map[y][x].type==WOOD && (spath[y][x]&0x00000F00) )
 
 template<typename F>
 void dumpDecisionMap3(i32 m[MAP_ROW+2][MAP_COL+2], F f) {
@@ -221,7 +231,6 @@ static auto OpStr = [](Operator op) {
 
 // fill `evd`
 void detonate(int _y, int _x, CoordSet* detonated=0) {
-    const i32 STACK_FACTOR = 1;
     static i32 min_ttl;
     if (!detonated) {
         min_ttl = 65535;
@@ -229,14 +238,14 @@ void detonate(int _y, int _x, CoordSet* detonated=0) {
         detonate(_y, _x, detonated);
         // detonate all bombs!
         detonated->for_each2( [&](int dy, int dx){
-            evd[dy][dx] = evd[dy][dx] + STACK_FACTOR*(BOMB_POWER) + min_ttl;
+            evd[dy][dx] = evd[dy][dx] + BOMB_STACK_FACTOR*(BOMB_POWER) /* +min_ttl */;
             for (int d=0; d!=4; ++d) {
                 int y=dy, x=dx;
-                for (int i=1; i<=BOMB_POWER; ++i) {
+                for (int i=0; i!=BOMB_POWER; ++i) {
                     dirs[d](y, x);
                     if (Type==STONE || Type==HOME || Type==WOOD)
                         break;
-                    evd[y][x] = min(evd[y][x]?evd[y][x]:EVD_MAX, evd[y][x]+STACK_FACTOR*(BOMB_POWER-i)+min_ttl);
+                    evd[y][x] = min(evd[y][x]?evd[y][x]:EVD_MAX, evd[y][x]+BOMB_STACK_FACTOR*(BOMB_POWER-i)+min_ttl);
                 }
             }
         } );
@@ -307,6 +316,22 @@ void flood_dfh(int y, int x) {
     }
 }
 
+void avoid_cluster() {
+    for (int p=0; p!=3; ++p) {
+        int pY = player[p].pos.y;
+        int pX = player[p].pos.x;
+        evd[pY][pX] += CLUSTER_FACTOR*(CLUSTER_DIST+1);
+        for (int d=0; d!=4; ++d) {
+            int y=pY, x=pX;
+            for (int i=0; i!=CLUSTER_DIST; ++i) {
+                dirs[d](y,x);
+                if (Type==BLANK || Type==WOOD)
+                    evd[y][x] += CLUSTER_FACTOR*(CLUSTER_DIST-i);
+            }
+        }
+    }
+}
+
 void calc_decision_points() {
     memset(dts, sizeof(dts), 0);
     memset(evd, sizeof(evd), 0);
@@ -328,20 +353,33 @@ void calc_decision_points() {
         for (int x=1; x<=MAP_COL; ++x) {
             if (map[y][x].type == HOME) {
                 if (map[y][x].home.group != grpid)
-                    enemy_home = COORD(y, x);
+                    enemy = COORD(y, x);
                 if (map[y][x].home.group == grpid)
-                    my_home = COORD(y, x);
+                    my = COORD(y, x);
             }
             if (map[y][x].type == BOMB) {
                 detonate(y, x);
             }
         }
     }
+    
+    avoid_cluster();
 
-    /* take care for positions that can bomb enemy_home directly!
+    // flood DTS
+    /* take care for positions that can bomb enemy directly!
      * their dts is 1 */
-    cs->insert(enemy_home);
-    dts[enemy_home.y][enemy_home.x] = 1;
+    cs->insert(enemy);
+    dts[enemy.y][enemy.x] = 1;
+    for (int d=0; d!=4; ++d) {
+        int ny=enemy.y, nx=enemy.x;
+        for (int i=0; i!=BOMB_POWER; ++i) {
+            dirs[d](ny,nx);
+            if (TypeYX(ny,nx)==BLANK)
+                dts[ny][nx] = 1;
+            else
+                break;
+        }
+    }
     while (cs->size()) {
         next_cs->clear();
         cs->for_each2( [&](int y, int x){
@@ -351,8 +389,9 @@ void calc_decision_points() {
         std::swap(cs, next_cs);
     }
 
-    cs->insert(my_home);
-    dfh[my_home.y][my_home.x] = 1;
+    // flood DFH
+    cs->insert(my);
+    dfh[my.y][my.x] = 1;
     while (cs->size()) {
         next_cs->clear();
         cs->for_each2( [&](int y, int x){
@@ -360,11 +399,13 @@ void calc_decision_points() {
         });
         std::swap(cs, next_cs);
     }
-
+    
+    // overlay evd
     for (int y=0; y!=MAP_ROW+2; ++y)
         for (int x=0; x!=MAP_COL+2; ++x)
             spv[y][x] = dts[y][x] + evd[y][x];
-
+           
+    // calculate SPath
     for (int y=0; y!=MAP_ROW+2; ++y)
         for (int x=0; x!=MAP_COL+2; ++x) {
             if (Type==STONE || Type==HOME) continue;
@@ -383,7 +424,31 @@ void calc_decision_points() {
                 }
             }
         }
+        
+    /* Don't walk into a WOOD in SPath, if we have alternatives */
+    for (int y=0; y!=MAP_ROW+2; ++y)
+        for (int x=0; x!=MAP_COL+2; ++x) {
+            int num_of_choice = 0;
+            int num_of_wood   = 0;
+            i32 wood_mask     = 0;
+            for (int d=0; d!=4; ++d) {
+                if ( (spath[y][x] & (1<<dirs_bit[d])) == (1<<dirs_bit[d]) ) {
+                    num_of_choice++;
+                    int ny=y, nx=x;
+                    dirs[d](ny,nx);
+                    if (TypeYX(ny,nx)==WOOD) {
+                        num_of_wood++;
+                        wood_mask |= (1<<dirs_bit[d]);
+                    }
+                }
+                if (num_of_choice > num_of_wood) {
+                    spath[y][x] &= ~wood_mask;
+                }
+            }
+        }
 
+    DBG("SPath\n");
+    dumpSPath();
     // flood SPath's cell reference, remove non-BLANK target's SPath bit
     for (int y=0; y!=MAP_ROW+2; ++y)
         for (int x=0; x!=MAP_COL+2; ++x) {
@@ -397,43 +462,32 @@ void calc_decision_points() {
                 }
             }
         }
-
-    /*
-    cs->clear();
-    cs->insert(my_home);
-    while (cs->size()) {
-        next_cs->clear();
-        cs->for_each2( [&](int y, int x){
-            //DBG("SPath Reference: %2d, %2d\n", y,x);
-            for (int d=0; d!=4; ++d)
-                if (spath[y][x] & (1<<dirs_bit[d])) {
-                    int sy=y, sx=x;
-                    dirs[d](sy, sx);
-                    spath[sy][sx] |= (1<<(8+dirs_bit[d]));
-                    next_cs->insert(sy, sx);
-                }
-        });
-        std::swap(cs, next_cs);
-    }*/
-
-    dumpEvd();
+        
+    //dumpEvd();
+    DBG("DTS\n");
     dumpDTS();
+    DBG("SPV\n");
     dumpSPV();
+    DBG("SPV Path\n");
     dumpSPath();
-    dumpDFH();
+    //dumpDFH();
 }
 
 Operator normal_decide(Player p) {
+    int pid = p.player;
     /* normally, bomber choose a position with least DTS
      * if put a bomb in current position can destroy a WOOD with less DTS, place bomb
      */
     DBG("Normal decision\n");
-    #define LESS_DTS(x,y,d) ( y>0 && y<=MAP_ROW && x>0 && x<=MAP_COL && dts[x][y] && dts[y][x]<(d) )
-    #define PRESERVED_WOOD(Y,X) (abs((X)-my_home.x)<=BOMB_POWER && abs((Y)-my_home.y)<=BOMB_POWER)
+    
+    #define PRESERVED_WOOD(Y,X) (abs((X)-my.x)<=BOMB_POWER && abs((Y)-my.y)<=BOMB_POWER)
     #define STRIKE_POS(Y,X) (     \
-           ( abs((X)-enemy_home.x)<=BOMB_POWER && X==enemy_home.y )    \
-        || ( abs((Y)-enemy_home.y)<=BOMB_POWER && Y==enemy_home.x )    \
+           ( abs((X)-enemy.x)<=BOMB_POWER && Y==enemy.y )    \
+        || ( abs((Y)-enemy.y)<=BOMB_POWER && X==enemy.x )    \
     )
+    // WOOD is on Shortest-Path, if neighbour points to it (I guessed :D)
+    //                           and DTS(WOOD) < DTS(cur)    // checked in decision maker
+    #define SPATH_WOOD(y,x) ( map[y][x].type==WOOD && (spath[y][x]&0x00000F00) )
     int pY = p.pos.y, pX = p.pos.x;
     i32 cur_dts = dts[pY][pX];
     i32 opt_move = spath[pY][pX] & 15;   // move options
@@ -443,6 +497,8 @@ Operator normal_decide(Player p) {
         int y=p.pos.y, x=p.pos.x;
         for (int i=0; i!=BOMB_POWER; ++i) {
             dirs[d](y, x);
+            bool blocked = Type==STONE || Type==BOMB;
+            if (blocked) break;
             /*
             DBG("ckk PUT: %2d, %2d:  %s %s %s %s %s,  ", y, x,
                         SPATH_WOOD(y,x)?"SPWOOD":"      ",
@@ -461,6 +517,9 @@ Operator normal_decide(Player p) {
             //DBG("\n");
         }
     }
+    
+    if (DTS(pY,pX)==1) 
+        opt_move |= BIT_PUT;
 
     // We just put a bomb, choose direction so we can go to a safe position!!
     if (TypeYX(pY,pX)==BOMB) {
@@ -468,14 +527,15 @@ Operator normal_decide(Player p) {
         for (int d=0; d!=4; ++d) {
             int ny=pY, nx=pX;
             dirs[d](ny,nx);
-            if (TypeYX(ny,nx)==BLANK && dfh[ny][nx]<dfh[pY][pX])
+            if (TypeYX(ny,nx)==BLANK && dfh[ny][nx]<dfh[pY][pX]) {
                 opt_move = (1<<dirs_bit[d]);
+            }
         }
     }
 
     // consider move away from home, if round < 5
     // a hack to Jammed Initial position for Bomber B/C, around the preserved woods
-    if ((opt_move&15)==0 && round<5) {
+    if ((opt_move&15)==0 && game_round<5) {
         DBG("Patch starting round NOOP\n");
         for (int d=0; d!=4; ++d) {
             int ny=pY, nx=pX;
@@ -488,19 +548,31 @@ Operator normal_decide(Player p) {
     // check Op-Move
     DBG("Acceptable Op: %x\n", opt_move);
     #define isOP(bit)  ((opt_move & BIT_##bit) == BIT_##bit)
-    if ( isOP(PUT) )
+    if ( TypeYX(pY,pX)!=BOMB && isOP(PUT) ) {
+        // avoid placing two bombs that bombs enemy home in the same round!
+        if (STRIKE_POS(pY,pX)) {
+            if (!bomb_at_home) {
+                bomb_at_home = true;
+                return PUT;
+            }else{
+                return NOP;
+            }
+        }
         return PUT;
+    }
     if ( isOP(ANY) )
-        return rand()%2 ? (rand()%2 ? LEFT : RIGHT) : (rand()%2 ? UP : DOWN);
+        return pid%2 ? (pid%2 ? LEFT : RIGHT) : (pid%2 ? UP : DOWN);
     if ( isOP(HORZ) ) {
         if (isOP(UP))   return UP;
         if (isOP(DOWN)) return DOWN;
-        return rand()%2 ? LEFT : RIGHT;
+        return pid%2 ? LEFT : RIGHT;
     }
     if ( isOP(VERT) ) {
         if (isOP(LEFT))  return LEFT;
         if (isOP(RIGHT)) return RIGHT;
-        return rand()%2 ? UP : DOWN;
+        if (p.player==PLAYER_B)
+            return rand()%2 ? UP : DOWN;
+        return pid%2 ? UP : DOWN;
     }
     if (isOP(LEFT))  return LEFT;
     if (isOP(RIGHT)) return RIGHT;
@@ -511,19 +583,74 @@ Operator normal_decide(Player p) {
 }
 
 void AI(const Game *game, Operator op[PLAYER_NUM]) {
-    srand (time(NULL));
+    srand(time(0));
+    DBG("\n\nRound: %d\n", ROUND_MAX - game->round);
     // initialize global variables
     grpid = game->grpid;
     player_op = op;
     player = game->group[grpid].player;
-    round  = game->round;
+    enemy_player = game->group[grpid==1?0:1].player;
+    game_round  = ROUND_MAX - game->round;
     memcpy(map, game->map, sizeof(map));
+    for (int p=0; p!=PLAYER_NUM; ++p)
+        player_pos.insert(player[p].pos.y, player[p].pos.x);
 
-    // flood DTS
+    // figure out decision points (SPV, SPath)
     calc_decision_points();
+    
     // decide if we should put bombs!
+    // avoid place 2 bombs placed near enemy in same round
+    // because: 2 bombs detonates at the same time only cause 1 HP loss
+    bomb_at_home = false; 
+    int alive_count = 0;
     for (int np=0; np!=PLAYER_NUM; ++np) {
         op[np] = normal_decide(player[np]);
+        if (player[np].life_value>0) 
+            alive_count++;
         DBG("Decided: %c, From %2d, %2d, %s\n", 'A'+np, player[np].pos.y, player[np].pos.x, OpStr(op[np]));
+    }
+    
+    // if A or C is at Y==8, X=[enemy-2], backtrack(up/down), or we end up in infinite loop!
+    if (   player[PLAYER_A].pos.y==(MAP_ROW+2)/2 
+        && abs(player[PLAYER_A].pos.x-enemy.x)==2
+    ){
+        int aY = player[PLAYER_A].pos.y;
+        int aX = player[PLAYER_A].pos.x;
+        if (TypeYX(aY-1, aX)==BLANK)
+            op[PLAYER_A] = UP;
+    }
+    if (   player[PLAYER_C].pos.y==(MAP_ROW+2)/2
+        && abs(player[PLAYER_C].pos.x-enemy.x)==2
+    ){
+        int cY = player[PLAYER_C].pos.y;
+        int cX = player[PLAYER_C].pos.x;
+        if (TypeYX(cY+1, cX)==BLANK)
+            op[PLAYER_C] = DOWN;
+    }
+    
+    // Halt B's operation after initial startup
+    // or B will block A,C's offensive path, resulting in a infinite loop
+    // TODO: issues with avoid_cluster() algorithm.
+    if (game_round > PLAYER_B_STAGE_2_ROUND) {
+        if (alive_count>=3) {
+            // keep moving B to preserved wood, if we have A,C on offensive
+            // let's buy HQ some time if enemy bombs it.
+            int bY = player[PLAYER_B].pos.y;
+            int bX = player[PLAYER_B].pos.x;
+            int dltX = 0;
+            if (bX - my.x > 0) {        // Move left
+                op[PLAYER_B] = LEFT;
+                dltX = -1;
+            }else if (my.x - bX > 0) {  // Move right
+                op[PLAYER_B] = RIGHT;
+                dltX = 1;
+            }else {
+                op[PLAYER_B] = NOP;
+            }
+            // don't walk into WOOD/STONE, in case Benchmarker gets insane. 
+            if (TypeYX(bX+dltX, bY)==WOOD && TypeYX(bX+dltX, bY)==STONE) {
+                op[PLAYER_B] = NOP; 
+            }
+        }
     }
 }

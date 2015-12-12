@@ -1,3 +1,8 @@
 *.o
+*.h
 a.out
 *DS_Store
+*.exe
+*.a
+*.dll
+*.bat
